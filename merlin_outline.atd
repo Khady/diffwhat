@@ -1,0 +1,24 @@
+type kind = [
+  | Value
+  | Module
+  | Type
+  | Label
+  | Constructor
+]
+
+type pos = {
+    line: int;
+    col: int;
+}
+
+type value = {
+    start: pos;
+    end_ <json name="end">: pos;
+    name: string;
+    kind: kind;
+    children: value list;
+}
+
+type doc = {
+   value: value list
+}

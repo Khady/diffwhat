@@ -1,0 +1,12 @@
+(executable
+ (name diffwhat)
+ (libraries extlib tyre result yojson unix atdgen-runtime biniou))
+
+(rule
+ (targets merlin_outline_t.mli merlin_outline_t.ml merlin_outline_j.mli
+   merlin_outline_j.ml)
+ (deps merlin_outline.atd)
+ (action
+  (progn
+   (run %{bin:atdgen} -o merlin_outline -j-std -j -j-defaults %{deps})
+   (run %{bin:atdgen} -o merlin_outline -t %{deps}))))
