@@ -1,11 +1,12 @@
 (library
  (name diffwhat_lib)
+ (wrapped false)
  (modules
   (:standard \ diffwhat))
- (libraries unix yojson))
+ (libraries jsonrpc lsp patch unix))
 
 (executable
  (name diffwhat)
  (public_name diffwhat)
  (modules diffwhat)
- (libraries diffwhat_lib))
+ (libraries cmdliner diffwhat_lib))

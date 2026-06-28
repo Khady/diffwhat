@@ -8,14 +8,15 @@ dev-repo: "git+https://github.com/Khady/diffwhat.git"
 doc: "https://khady.github.io/diffwhat/"
 tags: ["git" "diff"]
 depends: [
-  "ocaml" {>= "5.4" & < "5.5"}
+  "ocaml" {>= "5.4"}
   "dune" {>= "3.20"}
-  "merlin"
-  "ocp-index" {>= "1.4"}
-  "yojson" {>= "2.0"}
+  "cmdliner" {>= "2.0"}
+  "jsonrpc" {>= "1.26"}
+  "lsp" {>= "1.26"}
+  "patch" {>= "3.1.1"}
   "alcotest" {with-test}
+  "ocaml-lsp-server" {with-test}
   "ocamlformat" {= "0.29.0" & with-dev-setup}
-  "ocaml-lsp-server" {with-dev-setup}
 ]
 build: [
   ["dune" "subst"] {pinned}
