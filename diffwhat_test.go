@@ -171,21 +171,8 @@ func TestQualifyOCamlSymbol(t *testing.T) {
 }
 
 func TestRunWithOCamlLSP(t *testing.T) {
-	for _, executable := range []string{"dune", "ocamllsp"} {
-		if _, err := exec.LookPath(executable); err != nil {
-			t.Fatalf("%s is required for integration tests: %v", executable, err)
-		}
-	}
-
-	root, err := filepath.Abs(filepath.Join("testdata", "ocaml_project"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	build := exec.Command("dune", "build", "@ocaml-index")
-	build.Dir = root
-	if output, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("dune build: %v\n%s", err, output)
-	}
+	requireOCamlTools(t)
+	root := buildOCamlIndex(t, "ocaml_project")
 
 	diff := strings.NewReader(`diff --git a/example.ml b/example.ml
 --- a/example.ml
@@ -210,6 +197,80 @@ func TestRunWithOCamlLSP(t *testing.T) {
 	} {
 		if !strings.Contains(result, expected) {
 			t.Fatalf("run() output does not contain %q:\n%s", expected, result)
+		}
+	}
+}
+
+func TestRunWithComplexOCamlLayouts(t *testing.T) {
+	requireOCamlTools(t)
+	root := buildOCamlIndex(t, "complex_ocaml_project")
+
+	diff := strings.NewReader(`diff --git a/lib/math.ml b/lib/math.ml
+--- a/lib/math.ml
++++ b/lib/math.ml
+@@ -3 +3 @@
+-    value * 2
++    value * 3
+@@ -12 +12 @@
+-    Operation.apply value
++    Operation.apply (value + 1)
+`)
+	var output bytes.Buffer
+	if err := run(root, diff, &output); err != nil {
+		t.Fatal(err)
+	}
+
+	result := output.String()
+	if headings := strings.Count(result, "Places affected by a change in "); headings != 2 {
+		t.Fatalf("run() produced %d headings, want 2:\n%s", headings, result)
+	}
+	assertContainsAll(t, result, []string{
+		"Places affected by a change in Math.Nested.transform",
+		"bin/main.ml:2:  Toolkit.Math.Nested.transform 4",
+		"bin/main.ml:5:  Toolkit.Reexport.Nested.transform 5",
+		"bin/main.ml:8:  Toolkit.Reexport.Alias.transform 6",
+		"lib/consumers.ml:2:  Math.Nested.transform value",
+		"lib/consumers.ml:6:  Nested.transform value",
+		"lib/consumers.ml:10:  transform value",
+		"lib/math.ml:2:  let transform value =",
+		"lib/math.ml:16:  Nested.transform value",
+		"lib/reexport.ml:6:  Nested.transform value",
+		"lib/reexport.ml:9:  Alias.transform value",
+		"Places affected by a change in Math.Make.run",
+		"bin/main.ml:11:  Toolkit.Functor_ops.Runner.run 7",
+		"lib/functor_ops.ml:9:  Runner.run value",
+		"lib/math.ml:11:  let run value =",
+	})
+}
+
+func requireOCamlTools(t *testing.T) {
+	t.Helper()
+	for _, executable := range []string{"dune", "ocamllsp"} {
+		if _, err := exec.LookPath(executable); err != nil {
+			t.Fatalf("%s is required for integration tests: %v", executable, err)
+		}
+	}
+}
+
+func buildOCamlIndex(t *testing.T, project string) string {
+	t.Helper()
+	root, err := filepath.Abs(filepath.Join("testdata", project))
+	if err != nil {
+		t.Fatal(err)
+	}
+	build := exec.Command("dune", "build", "@ocaml-index")
+	build.Dir = root
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("dune build: %v\n%s", err, output)
+	}
+	return root
+}
+
+func assertContainsAll(t *testing.T, output string, expected []string) {
+	t.Helper()
+	for _, value := range expected {
+		if !strings.Contains(output, value) {
+			t.Errorf("output does not contain %q:\n%s", value, output)
 		}
 	}
 }

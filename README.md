@@ -20,7 +20,7 @@ index 212339e..707adcf 100644
      make ~name ~classname ~time Pass
  end
 
-ocaml-junit$ git diff -U0 | diffwhat $PWD
+ocaml-junit$ opam exec -- diffwhat
 Places affected by a change in Junit.Testcase.pass
 /home/louis/Code/github/ocaml-junit/ounit/junit_ounit.ml:18:    J.Testcase.pass
 /home/louis/Code/github/ocaml-junit/junit/test/simple.ml:59:        Junit.Testcase.pass
@@ -44,9 +44,11 @@ go build .
 opam exec -- go test ./...
 ```
 
-The test suite compiles a real OCaml fixture and exercises both
+The test suite compiles and indexes real OCaml fixtures and exercises both
 `textDocument/documentSymbol` and `textDocument/references` through
-`ocamllsp`.
+`ocamllsp`. Coverage includes nested modules, wrapped Dune libraries, direct
+references, module aliases, local aliases and opens, `include` re-exports, and
+functor results.
 
 Install it with:
 
@@ -62,13 +64,28 @@ Build the target project's OCaml index first:
 dune build @ocaml-index
 ```
 
-Then pass the target Git root as the only argument and a zero-context Git diff
-on standard input:
+Run Diffwhat from the target repository. By default it analyzes unstaged
+changes:
 
 ```bash
-git diff -U0 | diffwhat "$PWD"
+opam exec -- diffwhat
 ```
 
-Diffwhat starts the language server in the supplied Git root. A stale index can
-produce incomplete reference results; OCaml-LSP reports that condition as a
-warning.
+Other Git modes are available directly:
+
+```bash
+opam exec -- diffwhat --staged
+opam exec -- diffwhat main...HEAD
+opam exec -- diffwhat -C path/to/project
+```
+
+To analyze an externally produced patch, use:
+
+```bash
+git show HEAD | opam exec -- diffwhat --patch
+```
+
+Diffwhat discovers the Git root, obtains a zero-context diff, and starts the
+language server in that root. Untracked files are excluded, matching
+`git diff`. A stale index can produce incomplete reference results; OCaml-LSP
+reports that condition as a warning.
