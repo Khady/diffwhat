@@ -31,7 +31,7 @@ Places affected by a change in Junit.Testcase.pass
 
 ## Requirements
 
-- Go 1.24 or newer to build Diffwhat
+- Go 1.26 or newer to build Diffwhat
 - `ocamllsp` from `ocaml-lsp-server`
 - An up-to-date `@ocaml-index` for the target OCaml project
 

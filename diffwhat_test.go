@@ -10,83 +10,120 @@ import (
 )
 
 func TestChangesSingleHunk(t *testing.T) {
-	diff := []string{
-		"+++ b/lib/example.ml",
-		"@@ -7,2 +10,3 @@",
-	}
+	diff := strings.NewReader(`diff --git a/lib/example.ml b/lib/example.ml
+--- a/lib/example.ml
++++ b/lib/example.ml
+@@ -7,2 +10,3 @@
+-old one
+-old two
++new one
++new two
++new three
+`)
 	want := []fileChanges{{
 		Path:  "/project/lib/example.ml",
 		Lines: []int{10, 11, 12},
 	}}
 
-	got := changes("/project", diff, &strings.Builder{})
+	got, err := changes("/project", diff)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("changes() = %#v, want %#v", got, want)
 	}
 }
 
 func TestChangesMultipleHunksAndFiles(t *testing.T) {
-	diff := []string{
-		"+++ b/lib/first.ml",
-		"@@ -7 +10 @@",
-		"@@ -20,2 +30,2 @@",
-		"+++ b/README.md",
-		"@@ -1 +1 @@",
-		"+++ b/lib/second.ml",
-		"@@ -3 +4 @@",
-	}
+	diff := strings.NewReader(`diff --git a/lib/first.ml b/lib/first.ml
+--- a/lib/first.ml
++++ b/lib/first.ml
+@@ -7 +10 @@
+-old
++new
+@@ -20,2 +30,2 @@
+-old one
+-old two
++new one
++new two
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -1 +1 @@
+-old
++new
+diff --git a/lib/second.ml b/lib/second.ml
+--- a/lib/second.ml
++++ b/lib/second.ml
+@@ -3 +4 @@
+-old
++new
+`)
 	want := []fileChanges{
 		{Path: "/project/lib/first.ml", Lines: []int{10, 30, 31}},
 		{Path: "/project/README.md", Lines: []int{1}},
 		{Path: "/project/lib/second.ml", Lines: []int{4}},
 	}
 
-	got := changes("/project", diff, &strings.Builder{})
+	got, err := changes("/project", diff)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("changes() = %#v, want %#v", got, want)
 	}
 }
 
 func TestChangesIgnoresDeletedFiles(t *testing.T) {
-	diff := []string{
-		"+++ /dev/null",
-		"@@ -7 +0,0 @@",
-		"+++ b/lib/example.mli",
-		"@@ -1 +1 @@",
-	}
+	diff := strings.NewReader(`diff --git a/lib/deleted.ml b/lib/deleted.ml
+deleted file mode 100644
+--- a/lib/deleted.ml
++++ /dev/null
+@@ -7 +0,0 @@
+-deleted
+diff --git a/lib/example.mli b/lib/example.mli
+--- a/lib/example.mli
++++ b/lib/example.mli
+@@ -1 +1 @@
+-old
++new
+`)
 
 	want := []fileChanges{{
 		Path:  "/project/lib/example.mli",
 		Lines: []int{1},
 	}}
-	got := changes("/project", diff, &strings.Builder{})
+	got, err := changes("/project", diff)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("changes() = %#v, want %#v", got, want)
 	}
 }
 
-func TestParseHunk(t *testing.T) {
-	tests := []struct {
-		name   string
-		hunk   string
-		start  int
-		length int
-		ok     bool
-	}{
-		{name: "default length", hunk: "@@ -7 +10 @@", start: 10, length: 1, ok: true},
-		{name: "explicit length", hunk: "@@ -20,2 +30,2 @@ let example =", start: 30, length: 2, ok: true},
-		{name: "empty new range", hunk: "@@ -20 +30,0 @@", start: 30, length: 0, ok: true},
-		{name: "invalid", hunk: "@@ invalid @@", ok: false},
-	}
+func TestChangesHandlesRenamedPathsWithSpaces(t *testing.T) {
+	diff := strings.NewReader(`diff --git "a/lib/old name.ml" "b/lib/new name.ml"
+similarity index 80%
+rename from lib/old name.ml
+rename to lib/new name.ml
+--- "a/lib/old name.ml"
++++ "b/lib/new name.ml"
+@@ -1 +1 @@
+-old
++new
+`)
+	want := []fileChanges{{
+		Path:  "/project/lib/new name.ml",
+		Lines: []int{1},
+	}}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			start, length, ok := parseHunk(tt.hunk)
-			if start != tt.start || length != tt.length || ok != tt.ok {
-				t.Fatalf("parseHunk(%q) = (%d, %d, %t), want (%d, %d, %t)",
-					tt.hunk, start, length, ok, tt.start, tt.length, tt.ok)
-			}
-		})
+	got, err := changes("/project", diff)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("changes() = %#v, want %#v", got, want)
 	}
 }
 
@@ -150,7 +187,13 @@ func TestRunWithOCamlLSP(t *testing.T) {
 		t.Fatalf("dune build: %v\n%s", err, output)
 	}
 
-	diff := strings.NewReader("+++ b/example.ml\n@@ -2 +2 @@\n")
+	diff := strings.NewReader(`diff --git a/example.ml b/example.ml
+--- a/example.ml
++++ b/example.ml
+@@ -2 +2 @@
+-  let double value =
++  let double value =
+`)
 	var output bytes.Buffer
 	if err := run(root, diff, &output); err != nil {
 		t.Fatal(err)

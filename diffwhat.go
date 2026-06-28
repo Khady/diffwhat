@@ -8,8 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
-	"strings"
+
+	"github.com/bluekeyes/go-gitdiff/gitdiff"
 )
 
 type fileChanges struct {
@@ -17,87 +17,30 @@ type fileChanges struct {
 	Lines []int
 }
 
-func parseHunk(line string) (start, length int, ok bool) {
-	plus := strings.IndexByte(line, '+')
-	if plus == -1 {
-		return 0, 0, false
-	}
-	rangeEnd := strings.IndexByte(line[plus:], ' ')
-	if rangeEnd == -1 {
-		rangeEnd = len(line)
-	} else {
-		rangeEnd += plus
-	}
-
-	parts := strings.Split(line[plus+1:rangeEnd], ",")
-	if len(parts) < 1 || len(parts) > 2 {
-		return 0, 0, false
-	}
-	start, err := strconv.Atoi(parts[0])
+func changes(gitRoot string, diff io.Reader) ([]fileChanges, error) {
+	files, _, err := gitdiff.Parse(diff)
 	if err != nil {
-		return 0, 0, false
+		return nil, fmt.Errorf("parse diff: %w", err)
 	}
-	length = 1
-	if len(parts) == 2 {
-		length, err = strconv.Atoi(parts[1])
-		if err != nil {
-			return 0, 0, false
-		}
-	}
-	return start, length, start >= 0 && length >= 0
-}
 
-func changes(gitRoot string, diff []string, warnings io.Writer) []fileChanges {
 	var result []fileChanges
-	var current *fileChanges
-
-	flush := func() {
-		if current != nil {
-			result = append(result, *current)
-			current = nil
+	for _, file := range files {
+		if file.IsDelete || file.NewName == "" || file.IsBinary {
+			continue
 		}
-	}
-
-	for _, line := range diff {
-		if strings.HasPrefix(line, "+++ ") {
-			flush()
-			path, ok := diffPath(line)
-			if ok {
-				current = &fileChanges{Path: filepath.Join(gitRoot, filepath.FromSlash(path))}
+		changed := fileChanges{
+			Path: filepath.Join(gitRoot, filepath.FromSlash(file.NewName)),
+		}
+		for _, fragment := range file.TextFragments {
+			for offset := int64(0); offset < fragment.NewLines; offset++ {
+				changed.Lines = append(changed.Lines, int(fragment.NewPosition+offset))
 			}
-			continue
 		}
-		if current == nil || !strings.HasPrefix(line, "@@") {
-			continue
-		}
-
-		start, length, ok := parseHunk(line)
-		if !ok {
-			fmt.Fprintf(warnings, "unable to read hunk line for file %s: %s\n", current.Path, line)
-			continue
-		}
-		for lineNumber := start; lineNumber < start+length; lineNumber++ {
-			current.Lines = append(current.Lines, lineNumber)
+		if len(changed.Lines) > 0 {
+			result = append(result, changed)
 		}
 	}
-	flush()
-	return result
-}
-
-func diffPath(header string) (string, bool) {
-	path := strings.TrimPrefix(header, "+++ ")
-	if path == "/dev/null" {
-		return "", false
-	}
-	if strings.HasPrefix(path, "b/") {
-		path = strings.TrimPrefix(path, "b/")
-	} else {
-		return "", false
-	}
-	if path == "" {
-		return "", false
-	}
-	return path, true
+	return result, nil
 }
 
 func symbolsContainingLines(symbols []Symbol, lines []int) []Symbol {
@@ -121,10 +64,14 @@ func symbolsContainingLines(symbols []Symbol, lines []int) []Symbol {
 }
 
 func rangeContainsLine(symbolRange Range, line int) bool {
-	if line < symbolRange.Start.Line || line > symbolRange.End.Line {
+	if line < 0 {
 		return false
 	}
-	return line != symbolRange.End.Line ||
+	lspLine := uint32(line)
+	if lspLine < symbolRange.Start.Line || lspLine > symbolRange.End.Line {
+		return false
+	}
+	return lspLine != symbolRange.End.Line ||
 		symbolRange.End.Character > 0 ||
 		symbolRange.Start.Line == symbolRange.End.Line
 }
@@ -139,11 +86,10 @@ func run(gitRoot string, input io.Reader, output io.Writer) error {
 }
 
 func runContext(ctx context.Context, gitRoot string, input io.Reader, output io.Writer) error {
-	diff, err := readLines(input)
+	allChanges, err := changes(gitRoot, input)
 	if err != nil {
-		return fmt.Errorf("read diff: %w", err)
+		return err
 	}
-	allChanges := changes(gitRoot, diff, os.Stderr)
 
 	for _, language := range languages {
 		var languageChanges []fileChanges
@@ -237,10 +183,10 @@ func analyzeLanguage(
 }
 
 func renderLocation(location Location, sourceCache map[string][]string) (string, error) {
-	path, err := pathFromFileURI(location.URI)
-	if err != nil {
-		return "", err
+	if !location.URI.IsFile() {
+		return "", fmt.Errorf("unsupported reference URI %q", location.URI)
 	}
+	path := location.URI.FsPath()
 	lines, ok := sourceCache[path]
 	if !ok {
 		file, err := os.Open(path)
@@ -258,8 +204,8 @@ func renderLocation(location Location, sourceCache map[string][]string) (string,
 		sourceCache[path] = lines
 	}
 
-	line := location.Range.Start.Line
-	if line < 0 || line >= len(lines) {
+	line := int(location.Range.Start.Line)
+	if line >= len(lines) {
 		return "", fmt.Errorf("reference line %d is outside %s", line+1, path)
 	}
 	return fmt.Sprintf("%s:%d:%s", path, line+1, lines[line]), nil
@@ -268,7 +214,7 @@ func renderLocation(location Location, sourceCache map[string][]string) (string,
 func sortLocations(locations []Location) {
 	sort.Slice(locations, func(i, j int) bool {
 		if locations[i].URI != locations[j].URI {
-			return locations[i].URI < locations[j].URI
+			return locations[i].URI.String() < locations[j].URI.String()
 		}
 		return positionLess(locations[i].Range.Start, locations[j].Range.Start)
 	})
@@ -280,7 +226,7 @@ func deduplicateLocations(locations []Location) []Location {
 	for _, location := range locations {
 		key := fmt.Sprintf(
 			"%s:%d:%d:%d:%d",
-			location.URI,
+			location.URI.String(),
 			location.Range.Start.Line,
 			location.Range.Start.Character,
 			location.Range.End.Line,

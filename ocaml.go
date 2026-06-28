@@ -2,17 +2,13 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
-)
 
-const (
-	lspSymbolModule   = 2
-	lspSymbolFunction = 12
-	lspSymbolVariable = 13
+	"go.lsp.dev/protocol"
+	"go.lsp.dev/uri"
 )
 
 var ocamlLanguage = LanguageDefinition{
@@ -27,22 +23,7 @@ var ocamlLanguage = LanguageDefinition{
 
 type ocamlBackend struct {
 	client *lspClient
-	opened map[string]struct{}
-}
-
-type documentSymbol struct {
-	Name           string           `json:"name"`
-	Kind           int              `json:"kind"`
-	Range          Range            `json:"range"`
-	SelectionRange Range            `json:"selectionRange"`
-	Children       []documentSymbol `json:"children"`
-}
-
-type symbolInformation struct {
-	Name          string   `json:"name"`
-	Kind          int      `json:"kind"`
-	Location      Location `json:"location"`
-	ContainerName string   `json:"containerName"`
+	opened map[uri.URI]struct{}
 }
 
 func newOCamlBackend(ctx context.Context, root string) (*ocamlBackend, error) {
@@ -50,54 +31,47 @@ func newOCamlBackend(ctx context.Context, root string) (*ocamlBackend, error) {
 	if err != nil {
 		return nil, err
 	}
-	if !capabilityEnabled(client.capabilities.DocumentSymbolProvider) {
+	if !documentSymbolProviderEnabled(client.capabilities.DocumentSymbolProvider) {
 		client.abort()
 		return nil, fmt.Errorf("ocamllsp does not advertise document symbol support")
 	}
-	if !capabilityEnabled(client.capabilities.ReferencesProvider) {
+	if !referencesProviderEnabled(client.capabilities.ReferencesProvider) {
 		client.abort()
 		return nil, fmt.Errorf("ocamllsp does not advertise reference support")
 	}
-	return &ocamlBackend{client: client, opened: make(map[string]struct{})}, nil
+	return &ocamlBackend{client: client, opened: make(map[uri.URI]struct{})}, nil
 }
 
-func (b *ocamlBackend) Symbols(_ context.Context, path string) ([]Symbol, error) {
+func (b *ocamlBackend) Symbols(ctx context.Context, path string) ([]Symbol, error) {
 	uri, err := b.open(path)
 	if err != nil {
 		return nil, err
 	}
 
-	var raw []json.RawMessage
-	if err := b.client.request("textDocument/documentSymbol", map[string]any{
-		"textDocument": map[string]string{"uri": uri},
-	}, &raw); err != nil {
+	result, err := b.client.server.DocumentSymbol(ctx, &protocol.DocumentSymbolParams{
+		TextDocument: protocol.TextDocumentIdentifier{URI: uri},
+	})
+	if err != nil {
 		return nil, err
 	}
 	b.reportMessages()
-	if len(raw) == 0 {
+
+	switch result := result.(type) {
+	case protocol.DocumentSymbolSlice:
+		return hierarchicalOCamlSymbols(path, result), nil
+	case protocol.SymbolInformationSlice:
+		return flatOCamlSymbols(path, result), nil
+	case nil:
 		return nil, nil
+	default:
+		return nil, fmt.Errorf("ocamllsp returned unsupported document symbol result %T", result)
 	}
+}
 
-	var shape map[string]json.RawMessage
-	if err := json.Unmarshal(raw[0], &shape); err != nil {
-		return nil, fmt.Errorf("decode document symbol shape: %w", err)
-	}
-	if _, flat := shape["location"]; flat {
-		return b.flattenSymbolInformation(path, raw)
-	}
-
-	var documentSymbols []documentSymbol
-	data, err := json.Marshal(raw)
-	if err != nil {
-		return nil, fmt.Errorf("encode document symbols: %w", err)
-	}
-	if err := json.Unmarshal(data, &documentSymbols); err != nil {
-		return nil, fmt.Errorf("decode document symbols: %w", err)
-	}
-
+func hierarchicalOCamlSymbols(path string, documentSymbols []protocol.DocumentSymbol) []Symbol {
 	var symbols []Symbol
-	var walk func([]documentSymbol, []string)
-	walk = func(nodes []documentSymbol, containers []string) {
+	var walk func([]protocol.DocumentSymbol, []string)
+	walk = func(nodes []protocol.DocumentSymbol, containers []string) {
 		for _, node := range nodes {
 			if isOCamlValue(node.Kind) {
 				symbols = append(symbols, Symbol{
@@ -109,46 +83,39 @@ func (b *ocamlBackend) Symbols(_ context.Context, path string) ([]Symbol, error)
 				})
 			}
 			childContainers := containers
-			if node.Kind == lspSymbolModule {
+			if node.Kind == protocol.SymbolKindModule {
 				childContainers = append(append([]string(nil), containers...), node.Name)
 			}
 			walk(node.Children, childContainers)
 		}
 	}
 	walk(documentSymbols, nil)
-	return symbols, nil
+	return symbols
 }
 
-func (b *ocamlBackend) flattenSymbolInformation(
-	path string,
-	raw []json.RawMessage,
-) ([]Symbol, error) {
+func flatOCamlSymbols(path string, information []protocol.SymbolInformation) []Symbol {
 	var symbols []Symbol
-	for _, item := range raw {
-		var information symbolInformation
-		if err := json.Unmarshal(item, &information); err != nil {
-			return nil, fmt.Errorf("decode symbol information: %w", err)
-		}
-		if !isOCamlValue(information.Kind) {
+	for _, item := range information {
+		if !isOCamlValue(item.Kind) {
 			continue
 		}
 		containers := []string(nil)
-		if information.ContainerName != "" {
-			containers = []string{information.ContainerName}
+		if item.ContainerName != nil {
+			containers = []string{*item.ContainerName}
 		}
 		symbols = append(symbols, Symbol{
-			Name:           information.Name,
-			QualifiedName:  qualifyOCamlSymbol(path, containers, information.Name),
-			Kind:           information.Kind,
-			Range:          information.Location.Range,
-			SelectionRange: information.Location.Range,
+			Name:           item.Name,
+			QualifiedName:  qualifyOCamlSymbol(path, containers, item.Name),
+			Kind:           item.Kind,
+			Range:          item.Location.Range,
+			SelectionRange: item.Location.Range,
 		})
 	}
-	return symbols, nil
+	return symbols
 }
 
 func (b *ocamlBackend) References(
-	_ context.Context,
+	ctx context.Context,
 	path string,
 	position Position,
 ) ([]Location, error) {
@@ -156,51 +123,55 @@ func (b *ocamlBackend) References(
 	if err != nil {
 		return nil, err
 	}
-	var locations []Location
-	if err := b.client.request("textDocument/references", map[string]any{
-		"textDocument": map[string]string{"uri": uri},
-		"position":     position,
-		"context": map[string]bool{
-			"includeDeclaration": true,
+	locations, err := b.client.server.References(ctx, &protocol.ReferenceParams{
+		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
+			TextDocument: protocol.TextDocumentIdentifier{URI: uri},
+			Position:     position,
 		},
-	}, &locations); err != nil {
+		Context: protocol.ReferenceContext{IncludeDeclaration: true},
+	})
+	if err != nil {
 		return nil, err
 	}
 	b.reportMessages()
 	return locations, nil
 }
 
-func (b *ocamlBackend) open(path string) (string, error) {
-	uri, err := fileURI(path)
+func (b *ocamlBackend) open(path string) (uri.URI, error) {
+	absolutePath, err := filepath.Abs(path)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("make document path absolute: %w", err)
 	}
-	if _, ok := b.opened[uri]; ok {
-		return uri, nil
+	documentURI := uri.File(absolutePath)
+	if _, ok := b.opened[documentURI]; ok {
+		return documentURI, nil
 	}
 	source, err := os.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("read %s: %w", path, err)
 	}
-	if err := b.client.notify("textDocument/didOpen", map[string]any{
-		"textDocument": map[string]any{
-			"uri":        uri,
-			"languageId": "ocaml",
-			"version":    1,
-			"text":       string(source),
+	if err := b.client.server.DidOpen(b.client.ctx, &protocol.DidOpenTextDocumentParams{
+		TextDocument: protocol.TextDocumentItem{
+			URI:        documentURI,
+			LanguageID: protocol.LanguageKind("ocaml"),
+			Version:    1,
+			Text:       string(source),
 		},
 	}); err != nil {
 		return "", err
 	}
-	b.opened[uri] = struct{}{}
-	return uri, nil
+	b.opened[documentURI] = struct{}{}
+	return documentURI, nil
 }
 
 func (b *ocamlBackend) Close() error {
 	for uri := range b.opened {
-		if err := b.client.notify("textDocument/didClose", map[string]any{
-			"textDocument": map[string]string{"uri": uri},
-		}); err != nil {
+		if err := b.client.server.DidClose(
+			b.client.ctx,
+			&protocol.DidCloseTextDocumentParams{
+				TextDocument: protocol.TextDocumentIdentifier{URI: uri},
+			},
+		); err != nil {
 			b.client.abort()
 			return err
 		}
@@ -217,8 +188,8 @@ func (b *ocamlBackend) reportMessages() {
 	}
 }
 
-func isOCamlValue(kind int) bool {
-	return kind == lspSymbolVariable || kind == lspSymbolFunction
+func isOCamlValue(kind protocol.SymbolKind) bool {
+	return kind == protocol.SymbolKindVariable || kind == protocol.SymbolKindFunction
 }
 
 func qualifyOCamlSymbol(path string, containers []string, name string) string {

@@ -1,54 +1,63 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
-	"net/url"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
+
+	"go.lsp.dev/jsonrpc2"
+	"go.lsp.dev/protocol"
+	"go.lsp.dev/uri"
 )
 
 type lspClient struct {
-	command string
-	cmd     *exec.Cmd
-	stdin   io.WriteCloser
-	stdout  *bufio.Reader
-	stderr  bytes.Buffer
-	rootURI string
-	nextID  int
-	mu      sync.Mutex
-	closed  bool
-
-	capabilities lspServerCapabilities
-	showMessages []string
+	command      string
+	cmd          *exec.Cmd
+	conn         jsonrpc2.Conn
+	server       protocol.Server
+	callbacks    *lspCallbacks
+	capabilities protocol.ServerCapabilities
+	ctx          context.Context
+	stderr       bytes.Buffer
+	closed       bool
+	waitOnce     sync.Once
+	waitErr      error
 }
 
-type lspResponseError struct {
-	Code    int             `json:"code"`
-	Message string          `json:"message"`
-	Data    json.RawMessage `json:"data,omitempty"`
+type lspCallbacks struct {
+	protocol.UnimplementedClient
+
+	workspace protocol.WorkspaceFolder
+	mu        sync.Mutex
+	messages  []string
 }
 
-type lspEnvelope struct {
-	JSONRPC string            `json:"jsonrpc"`
-	ID      json.RawMessage   `json:"id,omitempty"`
-	Method  string            `json:"method,omitempty"`
-	Params  json.RawMessage   `json:"params,omitempty"`
-	Result  json.RawMessage   `json:"result,omitempty"`
-	Error   *lspResponseError `json:"error,omitempty"`
+type processStdio struct {
+	stdin  io.WriteCloser
+	stdout io.ReadCloser
+	once   sync.Once
+	err    error
 }
 
-type lspServerCapabilities struct {
-	PositionEncoding       string          `json:"positionEncoding"`
-	DocumentSymbolProvider json.RawMessage `json:"documentSymbolProvider"`
-	ReferencesProvider     json.RawMessage `json:"referencesProvider"`
+func (c *processStdio) Read(p []byte) (int, error) {
+	return c.stdout.Read(p)
+}
+
+func (c *processStdio) Write(p []byte) (int, error) {
+	return c.stdin.Write(p)
+}
+
+func (c *processStdio) Close() error {
+	c.once.Do(func() {
+		c.err = errors.Join(c.stdin.Close(), c.stdout.Close())
+	})
+	return c.err
 }
 
 func startLSPClient(
@@ -57,13 +66,18 @@ func startLSPClient(
 	command string,
 	args ...string,
 ) (*lspClient, error) {
-	rootURI, err := fileURI(root)
+	absoluteRoot, err := filepath.Abs(root)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("make workspace root absolute: %w", err)
+	}
+	rootURI := uri.File(absoluteRoot)
+	workspace := protocol.WorkspaceFolder{
+		URI:  rootURI,
+		Name: filepath.Base(absoluteRoot),
 	}
 
 	cmd := exec.CommandContext(ctx, command, args...)
-	cmd.Dir = root
+	cmd.Dir = absoluteRoot
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("%s stdin: %w", command, err)
@@ -74,230 +88,59 @@ func startLSPClient(
 	}
 
 	client := &lspClient{
-		command: command,
-		cmd:     cmd,
-		stdin:   stdin,
-		stdout:  bufio.NewReader(stdout),
-		rootURI: rootURI,
+		command:   command,
+		cmd:       cmd,
+		callbacks: &lspCallbacks{workspace: workspace},
 	}
 	cmd.Stderr = &client.stderr
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start %s: %w", command, err)
 	}
 
-	var initializeResult struct {
-		Capabilities lspServerCapabilities `json:"capabilities"`
-	}
-	initializeParams := map[string]any{
-		"processId": nil,
-		"clientInfo": map[string]any{
-			"name":    "diffwhat",
-			"version": "dev",
+	stream := jsonrpc2.NewHeaderStream(&processStdio{stdin: stdin, stdout: stdout})
+	client.ctx, client.conn, client.server = protocol.NewClient(ctx, client.callbacks, stream)
+
+	supportsWorkspaceFolders := true
+	supportsHierarchicalSymbols := true
+	initializeResult, err := client.server.Initialize(client.ctx, &protocol.InitializeParams{
+		WorkspaceFoldersInitializeParams: protocol.WorkspaceFoldersInitializeParams{
+			WorkspaceFolders: protocol.NewNullable([]protocol.WorkspaceFolder{workspace}),
 		},
-		"rootPath": root,
-		"rootUri":  rootURI,
-		"workspaceFolders": []map[string]string{{
-			"uri":  rootURI,
-			"name": filepath.Base(root),
-		}},
-		"capabilities": map[string]any{
-			"general": map[string]any{
-				"positionEncodings": []string{"utf-8", "utf-16"},
+		ProcessID: nil,
+		ClientInfo: protocol.ClientInfo{
+			Name:    "diffwhat",
+			Version: protocol.NewOptional("dev"),
+		},
+		RootURI: &rootURI,
+		Capabilities: protocol.ClientCapabilities{
+			Workspace: &protocol.WorkspaceClientCapabilities{
+				WorkspaceFolders: &supportsWorkspaceFolders,
 			},
-			"textDocument": map[string]any{
-				"documentSymbol": map[string]any{
-					"hierarchicalDocumentSymbolSupport": true,
+			TextDocument: &protocol.TextDocumentClientCapabilities{
+				References: &protocol.ReferenceClientCapabilities{},
+				DocumentSymbol: &protocol.DocumentSymbolClientCapabilities{
+					HierarchicalDocumentSymbolSupport: &supportsHierarchicalSymbols,
 				},
 			},
-			"workspace": map[string]any{
-				"workspaceFolders": true,
+			General: &protocol.GeneralClientCapabilities{
+				PositionEncodings: []protocol.PositionEncodingKind{
+					protocol.PositionEncodingKindUTF8,
+					protocol.PositionEncodingKindUTF16,
+				},
 			},
 		},
-	}
-	if err := client.request("initialize", initializeParams, &initializeResult); err != nil {
+	})
+	if err != nil {
 		client.abort()
 		return nil, fmt.Errorf("initialize %s: %w", command, err)
 	}
-	if err := client.notify("initialized", map[string]any{}); err != nil {
+	client.capabilities = initializeResult.Capabilities
+
+	if err := client.server.Initialized(client.ctx, &protocol.InitializedParams{}); err != nil {
 		client.abort()
 		return nil, fmt.Errorf("notify %s initialization: %w", command, err)
 	}
-	client.capabilities = initializeResult.Capabilities
 	return client, nil
-}
-
-func (c *lspClient) request(method string, params, result any) error {
-	c.nextID++
-	id := c.nextID
-	message := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      id,
-		"method":  method,
-	}
-	if params != nil {
-		message["params"] = params
-	}
-	if err := c.write(message); err != nil {
-		return err
-	}
-
-	for {
-		message, err := c.read()
-		if err != nil {
-			return c.withStderr(err)
-		}
-		if message.Method != "" {
-			if len(message.ID) != 0 && string(message.ID) != "null" {
-				if err := c.handleServerRequest(message); err != nil {
-					return err
-				}
-			} else {
-				c.handleNotification(message)
-			}
-			continue
-		}
-
-		var responseID int
-		if err := json.Unmarshal(message.ID, &responseID); err != nil {
-			return fmt.Errorf("decode %s response id: %w", method, err)
-		}
-		if responseID != id {
-			return fmt.Errorf("received response %d while waiting for %s request %d", responseID, method, id)
-		}
-		if message.Error != nil {
-			return fmt.Errorf(
-				"%s failed with code %d: %s",
-				method,
-				message.Error.Code,
-				message.Error.Message,
-			)
-		}
-		if result == nil || len(message.Result) == 0 || string(message.Result) == "null" {
-			return nil
-		}
-		if err := json.Unmarshal(message.Result, result); err != nil {
-			return fmt.Errorf("decode %s result: %w", method, err)
-		}
-		return nil
-	}
-}
-
-func (c *lspClient) handleNotification(message lspEnvelope) {
-	if message.Method != "window/showMessage" {
-		return
-	}
-	var params struct {
-		Message string `json:"message"`
-	}
-	if err := json.Unmarshal(message.Params, &params); err == nil && params.Message != "" {
-		c.showMessages = append(c.showMessages, params.Message)
-	}
-}
-
-func (c *lspClient) notify(method string, params any) error {
-	message := map[string]any{
-		"jsonrpc": "2.0",
-		"method":  method,
-	}
-	if params != nil {
-		message["params"] = params
-	}
-	return c.write(message)
-}
-
-func (c *lspClient) handleServerRequest(message lspEnvelope) error {
-	var result any
-	var responseError *lspResponseError
-
-	switch message.Method {
-	case "workspace/configuration":
-		var params struct {
-			Items []json.RawMessage `json:"items"`
-		}
-		if err := json.Unmarshal(message.Params, &params); err != nil {
-			return fmt.Errorf("decode workspace/configuration request: %w", err)
-		}
-		result = make([]any, len(params.Items))
-	case "workspace/workspaceFolders":
-		result = []map[string]string{{
-			"uri":  c.rootURI,
-			"name": filepath.Base(c.cmd.Dir),
-		}}
-	case "client/registerCapability", "client/unregisterCapability", "window/workDoneProgress/create":
-		result = nil
-	case "workspace/applyEdit":
-		result = map[string]any{"applied": false}
-	default:
-		responseError = &lspResponseError{
-			Code:    -32601,
-			Message: "method not supported by diffwhat",
-		}
-	}
-
-	response := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      message.ID,
-	}
-	if responseError == nil {
-		response["result"] = result
-	} else {
-		response["error"] = responseError
-	}
-	return c.write(response)
-}
-
-func (c *lspClient) write(message any) error {
-	payload, err := json.Marshal(message)
-	if err != nil {
-		return fmt.Errorf("encode LSP message: %w", err)
-	}
-
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if _, err := fmt.Fprintf(c.stdin, "Content-Length: %d\r\n\r\n", len(payload)); err != nil {
-		return fmt.Errorf("write LSP header: %w", err)
-	}
-	if _, err := c.stdin.Write(payload); err != nil {
-		return fmt.Errorf("write LSP payload: %w", err)
-	}
-	return nil
-}
-
-func (c *lspClient) read() (lspEnvelope, error) {
-	contentLength := -1
-	for {
-		line, err := c.stdout.ReadString('\n')
-		if err != nil {
-			return lspEnvelope{}, fmt.Errorf("read LSP header: %w", err)
-		}
-		line = strings.TrimSpace(line)
-		if line == "" {
-			break
-		}
-		name, value, ok := strings.Cut(line, ":")
-		if !ok {
-			return lspEnvelope{}, fmt.Errorf("invalid LSP header %q", line)
-		}
-		if strings.EqualFold(name, "Content-Length") {
-			contentLength, err = strconv.Atoi(strings.TrimSpace(value))
-			if err != nil {
-				return lspEnvelope{}, fmt.Errorf("invalid LSP content length %q", value)
-			}
-		}
-	}
-	if contentLength < 0 {
-		return lspEnvelope{}, fmt.Errorf("LSP message has no Content-Length header")
-	}
-
-	payload := make([]byte, contentLength)
-	if _, err := io.ReadFull(c.stdout, payload); err != nil {
-		return lspEnvelope{}, fmt.Errorf("read LSP payload: %w", err)
-	}
-	var message lspEnvelope
-	if err := json.Unmarshal(payload, &message); err != nil {
-		return lspEnvelope{}, fmt.Errorf("decode LSP message: %w", err)
-	}
-	return message, nil
 }
 
 func (c *lspClient) Close() error {
@@ -306,19 +149,19 @@ func (c *lspClient) Close() error {
 	}
 	c.closed = true
 
-	if err := c.request("shutdown", nil, nil); err != nil {
+	if err := c.server.Shutdown(c.ctx); err != nil {
 		c.abort()
-		return err
+		return c.withStderr(err)
 	}
-	if err := c.notify("exit", nil); err != nil {
+	if err := c.server.Exit(c.ctx); err != nil {
 		c.abort()
-		return err
+		return c.withStderr(err)
 	}
-	if err := c.stdin.Close(); err != nil {
-		c.abort()
-		return fmt.Errorf("close %s stdin: %w", c.command, err)
+	if err := c.conn.Close(); err != nil {
+		c.killAndWait()
+		return c.withStderr(err)
 	}
-	if err := c.cmd.Wait(); err != nil {
+	if err := c.wait(); err != nil {
 		return c.withStderr(fmt.Errorf("wait for %s: %w", c.command, err))
 	}
 	return nil
@@ -326,11 +169,24 @@ func (c *lspClient) Close() error {
 
 func (c *lspClient) abort() {
 	c.closed = true
-	_ = c.stdin.Close()
+	if c.conn != nil {
+		_ = c.conn.Close()
+	}
+	c.killAndWait()
+}
+
+func (c *lspClient) killAndWait() {
 	if c.cmd.Process != nil {
 		_ = c.cmd.Process.Kill()
 	}
-	_ = c.cmd.Wait()
+	_ = c.wait()
+}
+
+func (c *lspClient) wait() error {
+	c.waitOnce.Do(func() {
+		c.waitErr = c.cmd.Wait()
+	})
+	return c.waitErr
 }
 
 func (c *lspClient) withStderr(err error) error {
@@ -341,38 +197,46 @@ func (c *lspClient) withStderr(err error) error {
 	return fmt.Errorf("%w: %s", err, stderr)
 }
 
-func capabilityEnabled(capability json.RawMessage) bool {
-	if len(capability) == 0 || string(capability) == "null" || string(capability) == "false" {
-		return false
-	}
-	return true
-}
-
 func (c *lspClient) takeShowMessages() []string {
-	messages := c.showMessages
-	c.showMessages = nil
+	c.callbacks.mu.Lock()
+	defer c.callbacks.mu.Unlock()
+	messages := c.callbacks.messages
+	c.callbacks.messages = nil
 	return messages
 }
 
-func fileURI(path string) (string, error) {
-	absolute, err := filepath.Abs(path)
-	if err != nil {
-		return "", fmt.Errorf("make %s absolute: %w", path, err)
-	}
-	return (&url.URL{Scheme: "file", Path: filepath.ToSlash(absolute)}).String(), nil
+func (c *lspCallbacks) ShowMessage(
+	_ context.Context,
+	params *protocol.ShowMessageParams,
+) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.messages = append(c.messages, params.Message)
+	return nil
 }
 
-func pathFromFileURI(uri string) (string, error) {
-	parsed, err := url.Parse(uri)
-	if err != nil {
-		return "", fmt.Errorf("parse reference URI %q: %w", uri, err)
+func (c *lspCallbacks) WorkspaceFolders(context.Context) ([]protocol.WorkspaceFolder, error) {
+	return []protocol.WorkspaceFolder{c.workspace}, nil
+}
+
+func referencesProviderEnabled(provider protocol.ReferencesProvider) bool {
+	switch provider := provider.(type) {
+	case protocol.Boolean:
+		return bool(provider)
+	case *protocol.ReferenceOptions:
+		return true
+	default:
+		return false
 	}
-	if parsed.Scheme != "file" {
-		return "", fmt.Errorf("unsupported reference URI %q", uri)
+}
+
+func documentSymbolProviderEnabled(provider protocol.DocumentSymbolProvider) bool {
+	switch provider := provider.(type) {
+	case protocol.Boolean:
+		return bool(provider)
+	case *protocol.DocumentSymbolOptions:
+		return true
+	default:
+		return false
 	}
-	path := filepath.FromSlash(parsed.Path)
-	if parsed.Host != "" {
-		path = string(filepath.Separator) + string(filepath.Separator) + parsed.Host + path
-	}
-	return path, nil
 }

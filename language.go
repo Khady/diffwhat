@@ -1,28 +1,21 @@
 package main
 
-import "context"
+import (
+	"context"
 
-type Position struct {
-	Line      int `json:"line"`
-	Character int `json:"character"`
-}
+	"go.lsp.dev/protocol"
+)
 
-type Range struct {
-	Start Position `json:"start"`
-	End   Position `json:"end"`
-}
+type Position = protocol.Position
+type Range = protocol.Range
+type Location = protocol.Location
 
 type Symbol struct {
 	Name           string
 	QualifiedName  string
-	Kind           int
+	Kind           protocol.SymbolKind
 	Range          Range
 	SelectionRange Range
-}
-
-type Location struct {
-	URI   string `json:"uri"`
-	Range Range  `json:"range"`
 }
 
 type LanguageBackend interface {
