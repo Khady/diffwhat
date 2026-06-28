@@ -1,4 +1,3 @@
+/diffwhat
 _build/
 _opam/
-*.install
-*.merlin

@@ -1,3 +1,0 @@
-(test
- (name test_diffwhat)
- (libraries alcotest diffwhat_lib))

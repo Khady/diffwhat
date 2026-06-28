@@ -1,8 +1,8 @@
 # Diffwhat
 
-Diffwhat is a small tool to take changes from a diff and list all the places
-that are affected by those changes. It works only for ocaml. And it requires
-the project to be compiled beforehand.
+Diffwhat takes changes from a diff and lists the OCaml references that may be
+affected by those changes. It currently analyzes `.ml` implementation files
+only and requires the target OCaml project to be compiled beforehand.
 
 ```
 ocaml-junit$ dune build
@@ -28,15 +28,37 @@ Places affected by a change in Junit.Testcase.pass
 /home/louis/Code/github/ocaml-junit/alcotest/junit_alcotest.ml:21:      Junit.Testcase.pass
 ```
 
-## How to build
+## Requirements
 
-Diffwhat currently targets OCaml 5.4. `ocp-index`, which provides the
-`ocp-grep` command used by Diffwhat, does not yet support OCaml 5.5.
+- Go 1.24 or newer to build Diffwhat
+- `ocamlmerlin` from Merlin
+- `ocp-grep` from ocp-index
+- A compiled target OCaml project, including the Merlin and ocp-index metadata
+
+## Build and test
 
 ```bash
 opam switch create . 5.4.1
-opam install . --deps-only --with-dev-setup
-opam exec -- dune build @runtest
+opam install dune merlin ocp-index
+go build .
+opam exec -- go test ./...
 ```
 
-The executable can then be installed with `opam install .`.
+The test suite compiles a real OCaml fixture and exercises both
+`ocamlmerlin` and `ocp-grep`.
+
+Install it with:
+
+```bash
+go install github.com/Khady/diffwhat@latest
+```
+
+## Usage
+
+Run Diffwhat from the target project so Merlin and ocp-index can discover that
+project's build metadata. Pass the target Git root as the only argument and a
+zero-context Git diff on standard input:
+
+```bash
+git diff -U0 | diffwhat "$PWD"
+```
