@@ -19,7 +19,7 @@ index 212339e..707adcf 100644
      make ~name ~classname ~time Pass
  end
 
-ocaml-junit$ git diff -U0 | diffwhat.exe $PWD
+ocaml-junit$ git diff -U0 | diffwhat $PWD
 Places affected by a change in Junit.Testcase.pass
 /home/louis/Code/github/ocaml-junit/ounit/junit_ounit.ml:18:    J.Testcase.pass
 /home/louis/Code/github/ocaml-junit/junit/test/simple.ml:59:        Junit.Testcase.pass
@@ -30,7 +30,13 @@ Places affected by a change in Junit.Testcase.pass
 
 ## How to build
 
+Diffwhat currently targets OCaml 5.4. `ocp-index`, which provides the
+`ocp-grep` command used by Diffwhat, does not yet support OCaml 5.5.
+
 ```bash
-opam install . --deps-only
-dune build
+opam switch create . 5.4.1
+opam install . --deps-only --with-dev-setup
+opam exec -- dune build @runtest
 ```
+
+The executable can then be installed with `opam install .`.

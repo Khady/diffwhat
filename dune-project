@@ -1,1 +1,3 @@
-(lang dune 2.5)
+(lang dune 3.20)
+
+(name diffwhat)

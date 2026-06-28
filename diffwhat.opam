@@ -8,19 +8,27 @@ dev-repo: "git+https://github.com/Khady/diffwhat.git"
 doc: "https://khady.github.io/diffwhat/"
 tags: ["git" "diff"]
 depends: [
-  "atdgen"
-  "dune" {>= "2.5"}
-  "extlib"
+  "ocaml" {>= "5.4" & < "5.5"}
+  "dune" {>= "3.20"}
   "merlin"
-  "ocp-index"
-  "tyre"
-  "ocamlformat" {= "0.14.1" & dev}
+  "ocp-index" {>= "1.4"}
+  "yojson" {>= "2.0"}
+  "alcotest" {with-test}
+  "ocamlformat" {= "0.29.0" & with-dev-setup}
+  "ocaml-lsp-server" {with-dev-setup}
 ]
 build: [
   ["dune" "subst"] {pinned}
-  ["dune" "build" "-p" name "-j" jobs]
-  ["dune" "runtest" "-p" name "-j" jobs] {with-test}
-  ["dune" "build" "-p" name "-j" jobs] {with-doc}
+  [
+    "dune"
+    "build"
+    "-p"
+    name
+    "-j"
+    jobs
+    "@install"
+    "@runtest" {with-test}
+  ]
 ]
 name: "diffwhat"
 synopsis: "Find places affected by changes in a diff"
