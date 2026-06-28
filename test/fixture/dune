@@ -1,0 +1,4 @@
+(library
+ (name semantic_fixture)
+ (wrapped false)
+ (modules target consumer))

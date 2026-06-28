@@ -1,3 +1,14 @@
 (test
  (name test_diffwhat)
- (libraries alcotest diffwhat_lib))
+ (libraries alcotest diffwhat_lib semantic_fixture toolkit)
+ (deps
+  complex/bin/.main.eobjs/cctx.ocaml-index
+  complex/lib/.toolkit.objs/cctx.ocaml-index
+  (source_tree complex)
+  fixture/.semantic_fixture.objs/cctx.ocaml-index
+  (source_tree fixture))
+ (action
+  (setenv
+   DIFFWHAT_EXE
+   %{exe:../diffwhat.exe}
+   (run %{test}))))
