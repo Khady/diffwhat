@@ -12,27 +12,14 @@ jobs:
       - name: Check out the repository
         uses: actions/checkout@v6
 
-      - name: Set up OCaml 5.4
-        uses: ocaml/setup-ocaml@v3
+      - name: Set up Go
+        uses: actions/setup-go@v6
         with:
-          ocaml-compiler: "5.4"
-          dune-cache: true
+          go-version-file: go.mod
+          cache: false
 
       - name: Check formatting
-        uses: ocaml/setup-ocaml/lint-fmt@v3
+        run: test -z "$(gofmt -l .)"
 
-  opam:
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Check out the repository
-        uses: actions/checkout@v6
-
-      - name: Set up OCaml 5.4
-        uses: ocaml/setup-ocaml@v3
-        with:
-          ocaml-compiler: "5.4"
-          dune-cache: true
-
-      - name: Lint opam metadata
-        uses: ocaml/setup-ocaml/lint-opam@v3
+      - name: Vet
+        run: go vet ./...

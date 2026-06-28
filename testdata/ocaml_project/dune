@@ -1,0 +1,4 @@
+(library
+ (name diffwhat_test_project)
+ (wrapped false)
+ (modules example consumer))
