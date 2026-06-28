@@ -37,6 +37,7 @@ func TestChangesMultipleHunksAndFiles(t *testing.T) {
 	}
 	want := []fileChanges{
 		{Path: "/project/lib/first.ml", Lines: []int{10, 30, 31}},
+		{Path: "/project/README.md", Lines: []int{1}},
 		{Path: "/project/lib/second.ml", Lines: []int{4}},
 	}
 
@@ -46,7 +47,7 @@ func TestChangesMultipleHunksAndFiles(t *testing.T) {
 	}
 }
 
-func TestChangesIgnoresDeletedAndNonImplementationFiles(t *testing.T) {
+func TestChangesIgnoresDeletedFiles(t *testing.T) {
 	diff := []string{
 		"+++ /dev/null",
 		"@@ -7 +0,0 @@",
@@ -54,9 +55,13 @@ func TestChangesIgnoresDeletedAndNonImplementationFiles(t *testing.T) {
 		"@@ -1 +1 @@",
 	}
 
+	want := []fileChanges{{
+		Path:  "/project/lib/example.mli",
+		Lines: []int{1},
+	}}
 	got := changes("/project", diff, &strings.Builder{})
-	if len(got) != 0 {
-		t.Fatalf("changes() = %#v, want no changes", got)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("changes() = %#v, want %#v", got, want)
 	}
 }
 
@@ -85,45 +90,51 @@ func TestParseHunk(t *testing.T) {
 	}
 }
 
-func TestFunctionsIncludesNestedModules(t *testing.T) {
-	outlines := []outline{
-		{Kind: "Value", Name: "top_level", Start: position{Line: 1}, End: position{Line: 2}},
+func TestSymbolsContainingLines(t *testing.T) {
+	symbols := []Symbol{
 		{
-			Kind: "Module",
-			Name: "Nested",
-			Children: []outline{{
-				Kind: "Value", Name: "inner", Start: position{Line: 4}, End: position{Line: 7},
-			}},
+			Name:  "first",
+			Range: Range{Start: Position{Line: 0}, End: Position{Line: 2}},
 		},
-		{Kind: "Exn", Name: "Ignored", Start: position{Line: 9}, End: position{Line: 10}},
+		{
+			Name:  "second",
+			Range: Range{Start: Position{Line: 4}, End: Position{Line: 8}},
+		},
 	}
-	want := []function{
-		{Name: "Example.top_level", Start: 1, End: 2},
-		{Name: "Example.Nested.inner", Start: 4, End: 7},
-	}
+	want := []Symbol{symbols[1]}
 
-	got := functions(outlines, "/project/example.ml")
+	got := symbolsContainingLines(symbols, []int{6})
 	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("functions() = %#v, want %#v", got, want)
+		t.Fatalf("symbolsContainingLines() = %#v, want %#v", got, want)
 	}
 }
 
-func TestParseOutline(t *testing.T) {
-	data := []byte(`{"class":"return","value":[{"start":{"line":1,"col":0},"end":{"line":2,"col":3},"name":"run","kind":"Value","children":[]},{"start":{"line":3,"col":0},"end":{"line":3,"col":4},"name":"E","kind":"Exn","children":[]}]}`)
-
-	outlines, err := parseOutline(data)
-	if err != nil {
-		t.Fatal(err)
+func TestRangeContainsLineTreatsEndAsExclusive(t *testing.T) {
+	symbolRange := Range{
+		Start: Position{Line: 2, Character: 4},
+		End:   Position{Line: 5, Character: 0},
 	}
-	got := functions(outlines, "example.ml")
-	want := []function{{Name: "Example.run", Start: 1, End: 2}}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("functions() = %#v, want %#v", got, want)
+	if !rangeContainsLine(symbolRange, 4) {
+		t.Fatal("rangeContainsLine() rejected the last included line")
+	}
+	if rangeContainsLine(symbolRange, 5) {
+		t.Fatal("rangeContainsLine() included an exclusive end line")
 	}
 }
 
-func TestRunWithMerlinAndOCPGrep(t *testing.T) {
-	for _, executable := range []string{"dune", "ocamlmerlin", "ocp-grep"} {
+func TestQualifyOCamlSymbol(t *testing.T) {
+	got := qualifyOCamlSymbol(
+		"/project/example.ml",
+		[]string{"Nested", "Deeper"},
+		"run",
+	)
+	if want := "Example.Nested.Deeper.run"; got != want {
+		t.Fatalf("qualifyOCamlSymbol() = %q, want %q", got, want)
+	}
+}
+
+func TestRunWithOCamlLSP(t *testing.T) {
+	for _, executable := range []string{"dune", "ocamllsp"} {
 		if _, err := exec.LookPath(executable); err != nil {
 			t.Fatalf("%s is required for integration tests: %v", executable, err)
 		}
@@ -133,7 +144,7 @@ func TestRunWithMerlinAndOCPGrep(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	build := exec.Command("dune", "build")
+	build := exec.Command("dune", "build", "@ocaml-index")
 	build.Dir = root
 	if output, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("dune build: %v\n%s", err, output)

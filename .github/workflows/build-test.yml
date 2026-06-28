@@ -32,7 +32,7 @@ jobs:
           dune-cache: true
 
       - name: Install OCaml integration dependencies
-        run: opam install dune merlin ocp-index
+        run: opam install dune ocaml-lsp-server
 
       - name: Build and test
         run: opam exec -- go test ./...

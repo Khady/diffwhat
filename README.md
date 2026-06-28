@@ -1,11 +1,12 @@
 # Diffwhat
 
-Diffwhat takes changes from a diff and lists the OCaml references that may be
-affected by those changes. It currently analyzes `.ml` implementation files
-only and requires the target OCaml project to be compiled beforehand.
+Diffwhat takes changes from a diff and lists references that may be affected by
+those changes. It uses the Language Server Protocol (LSP) for source analysis.
+The first supported language is OCaml, currently limited to `.ml`
+implementation files.
 
 ```
-ocaml-junit$ dune build
+ocaml-junit$ dune build @ocaml-index
 ocaml-junit$ git diff
 diff --git a/junit/junit.ml b/junit/junit.ml
 index 212339e..707adcf 100644
@@ -31,21 +32,21 @@ Places affected by a change in Junit.Testcase.pass
 ## Requirements
 
 - Go 1.24 or newer to build Diffwhat
-- `ocamlmerlin` from Merlin
-- `ocp-grep` from ocp-index
-- A compiled target OCaml project, including the Merlin and ocp-index metadata
+- `ocamllsp` from `ocaml-lsp-server`
+- An up-to-date `@ocaml-index` for the target OCaml project
 
 ## Build and test
 
 ```bash
 opam switch create . 5.4.1
-opam install dune merlin ocp-index
+opam install dune ocaml-lsp-server
 go build .
 opam exec -- go test ./...
 ```
 
 The test suite compiles a real OCaml fixture and exercises both
-`ocamlmerlin` and `ocp-grep`.
+`textDocument/documentSymbol` and `textDocument/references` through
+`ocamllsp`.
 
 Install it with:
 
@@ -55,10 +56,19 @@ go install github.com/Khady/diffwhat@latest
 
 ## Usage
 
-Run Diffwhat from the target project so Merlin and ocp-index can discover that
-project's build metadata. Pass the target Git root as the only argument and a
-zero-context Git diff on standard input:
+Build the target project's OCaml index first:
+
+```bash
+dune build @ocaml-index
+```
+
+Then pass the target Git root as the only argument and a zero-context Git diff
+on standard input:
 
 ```bash
 git diff -U0 | diffwhat "$PWD"
 ```
+
+Diffwhat starts the language server in the supplied Git root. A stale index can
+produce incomplete reference results; OCaml-LSP reports that condition as a
+warning.

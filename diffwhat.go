@@ -2,134 +2,19 @@ package main
 
 import (
 	"bufio"
-	"bytes"
-	"encoding/json"
+	"context"
 	"fmt"
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 )
 
-type position struct {
-	Line int `json:"line"`
-	Col  int `json:"col"`
-}
-
-type outline struct {
-	Start    position  `json:"start"`
-	End      position  `json:"end"`
-	Name     string    `json:"name"`
-	Kind     string    `json:"kind"`
-	Children []outline `json:"children"`
-}
-
-type merlinResponse struct {
-	Class string    `json:"class"`
-	Value []outline `json:"value"`
-}
-
-type function struct {
-	Name  string
-	Start int
-	End   int
-}
-
 type fileChanges struct {
 	Path  string
 	Lines []int
-}
-
-func parseOutline(data []byte) ([]outline, error) {
-	var response merlinResponse
-	if err := json.Unmarshal(data, &response); err != nil {
-		return nil, fmt.Errorf("decode Merlin outline: %w", err)
-	}
-	if response.Class != "return" {
-		return nil, fmt.Errorf("Merlin outline returned class %q", response.Class)
-	}
-	return response.Value, nil
-}
-
-func merlinOutline(file string) ([]outline, error) {
-	input, err := os.Open(file)
-	if err != nil {
-		return nil, fmt.Errorf("open %s: %w", file, err)
-	}
-	defer input.Close()
-
-	var stdout, stderr bytes.Buffer
-	cmd := exec.Command(
-		"ocamlmerlin",
-		"single", "outline",
-		"-protocol", "json",
-		"-verbosity", "0",
-		"-filename", file,
-	)
-	cmd.Stdin = input
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	cmd.Dir = filepath.Dir(file)
-	if err := cmd.Run(); err != nil {
-		return nil, commandError("ocamlmerlin", err, stderr.String())
-	}
-
-	return parseOutline(stdout.Bytes())
-}
-
-func commandError(name string, err error, stderr string) error {
-	stderr = strings.TrimSpace(stderr)
-	if stderr == "" {
-		return fmt.Errorf("%s: %w", name, err)
-	}
-	return fmt.Errorf("%s: %w: %s", name, err, stderr)
-}
-
-func moduleOfFile(file string) string {
-	base := strings.TrimSuffix(filepath.Base(file), filepath.Ext(file))
-	if base == "" {
-		return ""
-	}
-	return strings.ToUpper(base[:1]) + base[1:]
-}
-
-func functions(outlines []outline, file string) []function {
-	var result []function
-	var walk func([]outline, []string)
-	walk = func(nodes []outline, modulePath []string) {
-		for _, node := range nodes {
-			switch node.Kind {
-			case "Value":
-				path := append(append([]string(nil), modulePath...), node.Name)
-				result = append(result, function{
-					Name:  strings.Join(path, "."),
-					Start: node.Start.Line,
-					End:   node.End.Line,
-				})
-			case "Module":
-				path := append(append([]string(nil), modulePath...), node.Name)
-				walk(node.Children, path)
-			}
-		}
-	}
-	walk(outlines, []string{moduleOfFile(file)})
-	return result
-}
-
-func ocpGrep(gitRoot, functionPath string) ([]string, error) {
-	var stdout, stderr bytes.Buffer
-	cmd := exec.Command("ocp-grep", functionPath)
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	cmd.Dir = gitRoot
-	if err := cmd.Run(); err != nil {
-		return nil, commandError("ocp-grep", err, stderr.String())
-	}
-
-	return readLines(&stdout)
 }
 
 func parseHunk(line string) (start, length int, ok bool) {
@@ -177,7 +62,7 @@ func changes(gitRoot string, diff []string, warnings io.Writer) []fileChanges {
 		if strings.HasPrefix(line, "+++ ") {
 			flush()
 			path, ok := diffPath(line)
-			if ok && strings.HasSuffix(path, ".ml") {
+			if ok {
 				current = &fileChanges{Path: filepath.Join(gitRoot, filepath.FromSlash(path))}
 			}
 			continue
@@ -215,64 +100,206 @@ func diffPath(header string) (string, bool) {
 	return path, true
 }
 
-func changedFunctionsOfFile(file string, lines []int) (map[string]struct{}, error) {
-	outlines, err := merlinOutline(file)
-	if err != nil {
-		return nil, err
-	}
-
+func symbolsContainingLines(symbols []Symbol, lines []int) []Symbol {
 	changedLines := make(map[int]struct{}, len(lines))
 	for _, line := range lines {
-		changedLines[line] = struct{}{}
+		if line > 0 {
+			changedLines[line-1] = struct{}{}
+		}
 	}
 
-	changed := make(map[string]struct{})
-	for _, fn := range functions(outlines, file) {
-		for line := fn.Start; line <= fn.End; line++ {
-			if _, ok := changedLines[line]; ok {
-				changed[fn.Name] = struct{}{}
+	var changed []Symbol
+	for _, symbol := range symbols {
+		for line := range changedLines {
+			if rangeContainsLine(symbol.Range, line) {
+				changed = append(changed, symbol)
 				break
 			}
 		}
 	}
-	return changed, nil
+	return changed
+}
+
+func rangeContainsLine(symbolRange Range, line int) bool {
+	if line < symbolRange.Start.Line || line > symbolRange.End.Line {
+		return false
+	}
+	return line != symbolRange.End.Line ||
+		symbolRange.End.Character > 0 ||
+		symbolRange.Start.Line == symbolRange.End.Line
+}
+
+type affectedSymbol struct {
+	File   string
+	Symbol Symbol
 }
 
 func run(gitRoot string, input io.Reader, output io.Writer) error {
+	return runContext(context.Background(), gitRoot, input, output)
+}
+
+func runContext(ctx context.Context, gitRoot string, input io.Reader, output io.Writer) error {
 	diff, err := readLines(input)
 	if err != nil {
 		return fmt.Errorf("read diff: %w", err)
 	}
+	allChanges := changes(gitRoot, diff, os.Stderr)
 
-	changed := make(map[string]struct{})
-	for _, file := range changes(gitRoot, diff, os.Stderr) {
-		names, err := changedFunctionsOfFile(file.Path, file.Lines)
+	for _, language := range languages {
+		var languageChanges []fileChanges
+		for _, file := range allChanges {
+			if language.Supports(file.Path) {
+				languageChanges = append(languageChanges, file)
+			}
+		}
+		if len(languageChanges) == 0 {
+			continue
+		}
+
+		backend, err := language.Start(ctx, gitRoot)
+		if err != nil {
+			return fmt.Errorf("start %s backend: %w", language.Name, err)
+		}
+
+		err = analyzeLanguage(ctx, backend, languageChanges, output)
+		closeErr := backend.Close()
+		if err != nil {
+			return err
+		}
+		if closeErr != nil {
+			return fmt.Errorf("stop %s backend: %w", language.Name, closeErr)
+		}
+	}
+	return nil
+}
+
+func analyzeLanguage(
+	ctx context.Context,
+	backend LanguageBackend,
+	files []fileChanges,
+	output io.Writer,
+) error {
+	changed := make(map[string]affectedSymbol)
+	for _, file := range files {
+		symbols, err := backend.Symbols(ctx, file.Path)
 		if err != nil {
 			return fmt.Errorf("analyze %s: %w", file.Path, err)
 		}
-		for name := range names {
-			changed[name] = struct{}{}
+		for _, symbol := range symbolsContainingLines(symbols, file.Lines) {
+			key := fmt.Sprintf(
+				"%s:%d:%d",
+				file.Path,
+				symbol.SelectionRange.Start.Line,
+				symbol.SelectionRange.Start.Character,
+			)
+			changed[key] = affectedSymbol{File: file.Path, Symbol: symbol}
 		}
 	}
 
-	names := make([]string, 0, len(changed))
-	for name := range changed {
-		names = append(names, name)
+	affected := make([]affectedSymbol, 0, len(changed))
+	for _, symbol := range changed {
+		affected = append(affected, symbol)
 	}
-	sort.Strings(names)
+	sort.Slice(affected, func(i, j int) bool {
+		if affected[i].Symbol.QualifiedName != affected[j].Symbol.QualifiedName {
+			return affected[i].Symbol.QualifiedName < affected[j].Symbol.QualifiedName
+		}
+		if affected[i].File != affected[j].File {
+			return affected[i].File < affected[j].File
+		}
+		return positionLess(
+			affected[i].Symbol.SelectionRange.Start,
+			affected[j].Symbol.SelectionRange.Start,
+		)
+	})
 
-	for _, name := range names {
-		occurrences, err := ocpGrep(gitRoot, name)
+	sourceCache := make(map[string][]string)
+	for _, affectedSymbol := range affected {
+		symbol := affectedSymbol.Symbol
+		references, err := backend.References(ctx, affectedSymbol.File, symbol.SelectionRange.Start)
 		if err != nil {
-			return fmt.Errorf("find references to %s: %w", name, err)
+			return fmt.Errorf("find references to %s: %w", symbol.QualifiedName, err)
 		}
-		fmt.Fprintf(output, "Places affected by a change in %s\n", name)
-		for _, occurrence := range occurrences {
-			fmt.Fprintln(output, occurrence)
+		references = deduplicateLocations(references)
+		sortLocations(references)
+
+		fmt.Fprintf(output, "Places affected by a change in %s\n", symbol.QualifiedName)
+		for _, reference := range references {
+			rendered, err := renderLocation(reference, sourceCache)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintln(output, rendered)
 		}
 		fmt.Fprintln(output)
 	}
 	return nil
+}
+
+func renderLocation(location Location, sourceCache map[string][]string) (string, error) {
+	path, err := pathFromFileURI(location.URI)
+	if err != nil {
+		return "", err
+	}
+	lines, ok := sourceCache[path]
+	if !ok {
+		file, err := os.Open(path)
+		if err != nil {
+			return "", fmt.Errorf("read reference source %s: %w", path, err)
+		}
+		lines, err = readLines(file)
+		closeErr := file.Close()
+		if err != nil {
+			return "", fmt.Errorf("read reference source %s: %w", path, err)
+		}
+		if closeErr != nil {
+			return "", fmt.Errorf("close reference source %s: %w", path, closeErr)
+		}
+		sourceCache[path] = lines
+	}
+
+	line := location.Range.Start.Line
+	if line < 0 || line >= len(lines) {
+		return "", fmt.Errorf("reference line %d is outside %s", line+1, path)
+	}
+	return fmt.Sprintf("%s:%d:%s", path, line+1, lines[line]), nil
+}
+
+func sortLocations(locations []Location) {
+	sort.Slice(locations, func(i, j int) bool {
+		if locations[i].URI != locations[j].URI {
+			return locations[i].URI < locations[j].URI
+		}
+		return positionLess(locations[i].Range.Start, locations[j].Range.Start)
+	})
+}
+
+func deduplicateLocations(locations []Location) []Location {
+	seen := make(map[string]struct{}, len(locations))
+	result := make([]Location, 0, len(locations))
+	for _, location := range locations {
+		key := fmt.Sprintf(
+			"%s:%d:%d:%d:%d",
+			location.URI,
+			location.Range.Start.Line,
+			location.Range.Start.Character,
+			location.Range.End.Line,
+			location.Range.End.Character,
+		)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		result = append(result, location)
+	}
+	return result
+}
+
+func positionLess(a, b Position) bool {
+	if a.Line != b.Line {
+		return a.Line < b.Line
+	}
+	return a.Character < b.Character
 }
 
 func readLines(reader io.Reader) ([]string, error) {
