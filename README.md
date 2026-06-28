@@ -2,8 +2,8 @@
 
 Diffwhat takes changes from a diff and lists references that may be affected by
 those changes. It uses the Language Server Protocol (LSP) for source analysis.
-The first supported language is OCaml, currently limited to `.ml`
-implementation files.
+It supports OCaml `.ml` implementation files through `ocamllsp` and Go `.go`
+files through `gopls`.
 
 ```
 ocaml-junit$ dune build @ocaml-index
@@ -32,23 +32,26 @@ Places affected by a change in Junit.Testcase.pass
 ## Requirements
 
 - Go 1.26 or newer to build Diffwhat
-- `ocamllsp` from `ocaml-lsp-server`
-- An up-to-date `@ocaml-index` for the target OCaml project
+- `gopls` when analyzing Go
+- `ocamllsp` from `ocaml-lsp-server` and an up-to-date `@ocaml-index` when
+  analyzing OCaml
 
 ## Build and test
 
 ```bash
 opam switch create . 5.4.1
 opam install dune ocaml-lsp-server
+go install golang.org/x/tools/gopls@latest
 go build .
 opam exec -- go test ./...
 ```
 
-The test suite compiles and indexes real OCaml fixtures and exercises both
-`textDocument/documentSymbol` and `textDocument/references` through
-`ocamllsp`. Coverage includes nested modules, wrapped Dune libraries, direct
-references, module aliases, local aliases and opens, `include` re-exports, and
-functor results.
+The test suite exercises `textDocument/documentSymbol` and
+`textDocument/references` against real language servers. OCaml coverage
+includes nested modules, wrapped Dune libraries, module aliases, local aliases
+and opens, `include` re-exports, and functor results. Go coverage includes
+cross-package and cross-module references, pointer and promoted methods,
+interfaces, concrete implementations, generics, and `_test.go` consumers.
 
 Install it with:
 
@@ -58,17 +61,19 @@ go install github.com/Khady/diffwhat@latest
 
 ## Usage
 
-Build the target project's OCaml index first:
+For OCaml projects, build the target project's index first:
 
 ```bash
 dune build @ocaml-index
 ```
 
 Run Diffwhat from the target repository. By default it analyzes unstaged
-changes:
+changes. Use `opam exec --` when the repository contains OCaml; for a Go-only
+repository, invoke `diffwhat` directly:
 
 ```bash
 opam exec -- diffwhat
+diffwhat
 ```
 
 Other Git modes are available directly:
@@ -86,6 +91,7 @@ git show HEAD | opam exec -- diffwhat --patch
 ```
 
 Diffwhat discovers the Git root, obtains a zero-context diff, and starts the
-language server in that root. Untracked files are excluded, matching
-`git diff`. A stale index can produce incomplete reference results; OCaml-LSP
-reports that condition as a warning.
+required language servers in that root. `gopls` supports both `go.mod` and
+`go.work` workspaces. Untracked files are excluded, matching `git diff`. A
+stale OCaml index can produce incomplete reference results; OCaml-LSP reports
+that condition as a warning.

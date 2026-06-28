@@ -170,6 +170,37 @@ func TestQualifyOCamlSymbol(t *testing.T) {
 	}
 }
 
+func TestQualifyGoSymbol(t *testing.T) {
+	declarations := goDeclarations{
+		packageName: "compute",
+		functions: []goFunction{
+			{name: "Transform", startLine: 2, endLine: 4},
+			{name: "Add", receiver: "*Accumulator", startLine: 10, endLine: 13},
+		},
+	}
+	tests := []struct {
+		name       string
+		symbolName string
+		line       uint32
+		want       string
+	}{
+		{name: "function", symbolName: "Transform", line: 2, want: "compute.Transform"},
+		{name: "pointer method", symbolName: "(*Accumulator).Add", line: 10, want: "compute.(*Accumulator).Add"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := qualifyGoSymbol(
+				declarations,
+				test.symbolName,
+				Range{Start: Position{Line: test.line}},
+			)
+			if got != test.want {
+				t.Fatalf("qualifyGoSymbol() = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestRunWithOCamlLSP(t *testing.T) {
 	requireOCamlTools(t)
 	root := buildOCamlIndex(t, "ocaml_project")
@@ -199,6 +230,117 @@ func TestRunWithOCamlLSP(t *testing.T) {
 			t.Fatalf("run() output does not contain %q:\n%s", expected, result)
 		}
 	}
+}
+
+func TestRunWithComplexGoLayouts(t *testing.T) {
+	requireGoTools(t)
+	root, err := filepath.Abs(filepath.Join("testdata", "complex_go_project"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	diff := strings.NewReader(`diff --git a/compute/compute.go b/compute/compute.go
+--- a/compute/compute.go
++++ b/compute/compute.go
+@@ -4 +4 @@
+-	return value * 2
++	return value * 3
+@@ -12 +12 @@
+-	a.total += value
++	a.total = a.total + value
+@@ -18 +18 @@
+-	result := make([]R, len(values))
++	result := make([]R, 0, len(values))
+`)
+	var output bytes.Buffer
+	if err := run(root, diff, &output); err != nil {
+		t.Fatal(err)
+	}
+
+	result := output.String()
+	if headings := strings.Count(result, "Places affected by a change in "); headings != 3 {
+		t.Fatalf("run() produced %d headings, want 3:\n%s", headings, result)
+	}
+	assertContainsAll(t, result, []string{
+		"Places affected by a change in compute.Transform",
+		"compute/compute.go:3:func Transform(value int) int {",
+		"compute/compute.go:31:\treturn Transform(value)",
+		"compute/compute_test.go:10:\tif compute.Transform(2) != 4 {",
+		"consumer/consumer.go:6:\treturn compute.Transform(value)",
+		"consumer/consumer.go:24:\treturn compute.Map(values, compute.Transform)",
+		"Places affected by a change in compute.(*Accumulator).Add",
+		"compute/compute.go:11:func (a *Accumulator) Add(value int) int {",
+		"compute/compute_test.go:17:\tif accumulator.Add(2) != 2 {",
+		"consumer/consumer.go:11:\treturn accumulator.Add(value)",
+		"consumer/consumer.go:20:\treturn accumulator.Add(value)",
+		"Places affected by a change in compute.Map",
+		"compute/compute.go:16:func Map[T any, R any](values []T, transform func(T) R) []R {",
+		"consumer/consumer.go:24:\treturn compute.Map(values, compute.Transform)",
+	})
+}
+
+func TestRunWithGoInterfaceAndConcreteMethods(t *testing.T) {
+	requireGoTools(t)
+	root, err := filepath.Abs(filepath.Join("testdata", "complex_go_project"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	diff := strings.NewReader(`diff --git a/compute/compute.go b/compute/compute.go
+--- a/compute/compute.go
++++ b/compute/compute.go
+@@ -25 +25 @@
+-	Transform(int) int
++	Transform(value int) int
+@@ -32 +32 @@
+-	return Transform(value)
++	return Transform(value + 1)
+`)
+	var output bytes.Buffer
+	if err := run(root, diff, &output); err != nil {
+		t.Fatal(err)
+	}
+
+	result := output.String()
+	if headings := strings.Count(result, "Places affected by a change in "); headings != 2 {
+		t.Fatalf("run() produced %d headings, want 2:\n%s", headings, result)
+	}
+	assertContainsAll(t, result, []string{
+		"Places affected by a change in compute.Transformer.Transform",
+		"compute/compute.go:25:\tTransform(int) int",
+		"consumer/consumer.go:28:\treturn transformer.Transform(value)",
+		"consumer/consumer.go:32:\treturn compute.Doubler{}.Transform(value)",
+		"Places affected by a change in compute.Doubler.Transform",
+		"compute/compute.go:30:func (Doubler) Transform(value int) int {",
+		"consumer/consumer.go:28:\treturn transformer.Transform(value)",
+		"consumer/consumer.go:32:\treturn compute.Doubler{}.Transform(value)",
+	})
+}
+
+func TestRunWithGoWorkspace(t *testing.T) {
+	requireGoTools(t)
+	root, err := filepath.Abs(filepath.Join("testdata", "go_workspace"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	diff := strings.NewReader(`diff --git a/shared/shared.go b/shared/shared.go
+--- a/shared/shared.go
++++ b/shared/shared.go
+@@ -4 +4 @@
+-	if value < 0 {
++	if value <= 0 {
+`)
+	var output bytes.Buffer
+	if err := run(root, diff, &output); err != nil {
+		t.Fatal(err)
+	}
+
+	assertContainsAll(t, output.String(), []string{
+		"Places affected by a change in shared.Normalize",
+		"shared/shared.go:3:func Normalize(value int) int {",
+		"app/main.go:10:\tfmt.Println(shared.Normalize(-2))",
+	})
 }
 
 func TestRunWithComplexOCamlLayouts(t *testing.T) {
@@ -241,6 +383,13 @@ func TestRunWithComplexOCamlLayouts(t *testing.T) {
 		"lib/functor_ops.ml:9:  Runner.run value",
 		"lib/math.ml:11:  let run value =",
 	})
+}
+
+func requireGoTools(t *testing.T) {
+	t.Helper()
+	if _, err := exec.LookPath("gopls"); err != nil {
+		t.Fatalf("gopls is required for integration tests: %v", err)
+	}
 }
 
 func requireOCamlTools(t *testing.T) {

@@ -157,14 +157,11 @@ func (c *lspClient) Close() error {
 		c.abort()
 		return c.withStderr(err)
 	}
-	if err := c.conn.Close(); err != nil {
-		c.killAndWait()
-		return c.withStderr(err)
-	}
 	if err := c.wait(); err != nil {
+		_ = c.conn.Close()
 		return c.withStderr(fmt.Errorf("wait for %s: %w", c.command, err))
 	}
-	return nil
+	return c.conn.Close()
 }
 
 func (c *lspClient) abort() {

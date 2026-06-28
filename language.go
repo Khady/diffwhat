@@ -30,4 +30,4 @@ type LanguageDefinition struct {
 	Start    func(context.Context, string) (LanguageBackend, error)
 }
 
-var languages = []LanguageDefinition{ocamlLanguage}
+var languages = []LanguageDefinition{ocamlLanguage, goLanguage}
